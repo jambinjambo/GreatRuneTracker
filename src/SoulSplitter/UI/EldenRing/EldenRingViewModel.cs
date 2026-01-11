@@ -22,6 +22,7 @@ using System.Xml.Serialization;
 using SoulMemory.EldenRing;
 using SoulSplitter.Splits.EldenRing;
 using SoulSplitter.UI.Generic;
+using SoulSplitter.UI.EldenRing.GreatRuneTracking;
 
 namespace SoulSplitter.UI.EldenRing;
 
@@ -52,6 +53,14 @@ public class EldenRingViewModel : ICustomNotifyPropertyChanged
         set => this.SetField(ref _currentPosition, value);
     }
     private PositionViewModel _currentPosition = new();
+
+    [XmlIgnore]
+    public GreatRuneTrackerViewModel GreatRuneTracker
+    {
+        get => _greatRuneTracker;
+        set => this.SetField(ref _greatRuneTracker, value);
+    }
+    private GreatRuneTrackerViewModel _greatRuneTracker = new();
 
 
     #region Adding new splits ================================================================================================================

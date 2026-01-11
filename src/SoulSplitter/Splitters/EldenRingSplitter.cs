@@ -23,6 +23,7 @@ using SoulMemory.EldenRing;
 using SoulSplitter.Splits.EldenRing;
 using SoulSplitter.UI;
 using SoulSplitter.UI.EldenRing;
+using SoulSplitter.UI.EldenRing.GreatRuneTracking;
 using SoulSplitter.UI.Generic;
 
 namespace SoulSplitter.Splitters;
@@ -33,6 +34,10 @@ internal class EldenRingSplitter : ISplitter
     private EldenRingViewModel _eldenRingViewModel = null!;
     private readonly LiveSplitState _liveSplitState;
     private MainViewModel _mainViewModel= null!;
+
+    // Great Rune tracking
+    private Dictionary<GreatRune, bool> _previousGreatRuneStates = new();
+    private bool _greatRuneTrackingInitialized;
 
     public EldenRingSplitter(LiveSplitState state, EldenRing eldenRing)
     {
@@ -115,6 +120,11 @@ internal class EldenRingSplitter : ISplitter
             mainViewModel.FlagTrackerViewModel.Update(_eldenRing);
         });
 
+        mainViewModel.TryAndHandleError(() =>
+        {
+            UpdateGreatRuneTracking();
+        });
+
         return result!;
     }
 
@@ -129,6 +139,43 @@ internal class EldenRingSplitter : ISplitter
         _eldenRingViewModel.CurrentPosition.X      = position.X     ;
         _eldenRingViewModel.CurrentPosition.Y      = position.Y     ;
         _eldenRingViewModel.CurrentPosition.Z      = position.Z     ;
+    }
+
+    private void UpdateGreatRuneTracking()
+    {
+        var tracker = _eldenRingViewModel.GreatRuneTracker;
+        if (!tracker.IsEnabled)
+            return;
+
+        if (!_greatRuneTrackingInitialized)
+        {
+            foreach (GreatRune rune in Enum.GetValues(typeof(GreatRune)))
+            {
+                _previousGreatRuneStates[rune] = _eldenRing.ReadEventFlag((uint)rune);
+            }
+            _greatRuneTrackingInitialized = true;
+            return;
+        }
+
+        foreach (GreatRune rune in Enum.GetValues(typeof(GreatRune)))
+        {
+            bool currentState = _eldenRing.ReadEventFlag((uint)rune);
+
+            if (currentState && !_previousGreatRuneStates[rune])
+            {
+                // Rune was just obtained
+                tracker.UpdateRuneStatus(rune, true);
+            }
+
+            _previousGreatRuneStates[rune] = currentState;
+        }
+    }
+
+    private void ResetGreatRuneTracking()
+    {
+        _previousGreatRuneStates.Clear();
+        _greatRuneTrackingInitialized = false;
+        _eldenRingViewModel.GreatRuneTracker.Reset();
     }
 
     //Starting the timer by calling Start(); on a TimerModel object will trigger more than just SoulSplitter's start event.
@@ -148,6 +195,7 @@ internal class EldenRingSplitter : ISplitter
         ResetTimer();
         ResetAutoSplitting();
         _mainViewModel.FlagTrackerViewModel.Reset();
+        ResetGreatRuneTracking();
     }
 
     #region Timer

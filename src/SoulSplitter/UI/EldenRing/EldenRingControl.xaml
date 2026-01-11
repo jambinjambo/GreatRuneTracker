@@ -28,6 +28,7 @@
              xmlns:system="clr-namespace:System;assembly=mscorlib"
              xmlns:converters="clr-namespace:SoulSplitter.UI.Converters"
              xmlns:generic="clr-namespace:SoulSplitter.UI.Generic"
+             xmlns:greatRuneTracking="clr-namespace:SoulSplitter.UI.EldenRing.GreatRuneTracking"
              mc:Ignorable="d"
              d:DataContext="{d:DesignInstance eldenRing:EldenRingViewModel, IsDesignTimeCreatable=True}">
 
@@ -83,7 +84,8 @@
                     <system:Int32 x:Key="SplitDefinitionRow"    >3</system:Int32>
                     <system:Int32 x:Key="SplitTypeRow"          >4</system:Int32>
                     <system:Int32 x:Key="AddRemoveSplitRow"     >5</system:Int32>
-                    <system:Int32 x:Key="SplitsTreeRow"         >6</system:Int32>
+                    <system:Int32 x:Key="GreatRuneTrackerRow"   >6</system:Int32>
+                    <system:Int32 x:Key="SplitsTreeRow"         >7</system:Int32>
 
                 </ResourceDictionary>
 
@@ -100,6 +102,7 @@
             <RowDefinition Height="40"/>
             <RowDefinition Height="45"/>
             <RowDefinition Height="70"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -505,10 +508,39 @@
                     Width="30" />
             </Button>
         </StackPanel>
-        
+
 
         <!-- row ============================================================================================================================================================================================== -->
-        
+
+        <!-- Great Rune Tracker (Randomizer) -->
+        <Expander
+            Grid.Row="{StaticResource GreatRuneTrackerRow}"
+            Header="Great Rune Tracker (Randomizer)"
+            Margin="5"
+            IsExpanded="False">
+            <StackPanel Margin="10,5">
+                <CheckBox
+                    Content="Enable Great Rune Tracking"
+                    IsChecked="{Binding GreatRuneTracker.IsEnabled}"/>
+
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <TextBlock Text="Spoiler Log Directory:" VerticalAlignment="Center"/>
+                    <TextBox
+                        Text="{Binding GreatRuneTracker.SpoilerLogDirectory, UpdateSourceTrigger=PropertyChanged}"
+                        Width="250"
+                        Margin="10,0"/>
+                </StackPanel>
+
+                <Button
+                    Content="Open Tracker Window"
+                    Margin="0,10,0,0"
+                    HorizontalAlignment="Left"
+                    Click="OpenGreatRuneTracker_Click"/>
+            </StackPanel>
+        </Expander>
+
+        <!-- row ============================================================================================================================================================================================== -->
+
         <TreeView
             Grid.Row="{StaticResource SplitsTreeRow}" 
             ItemsSource="{Binding Splits}"

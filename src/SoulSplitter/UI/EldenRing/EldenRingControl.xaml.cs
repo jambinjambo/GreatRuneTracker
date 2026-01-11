@@ -17,6 +17,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using SoulSplitter.UI.EldenRing.GreatRuneTracking;
 
 namespace SoulSplitter.UI.EldenRing;
 
@@ -100,5 +101,21 @@ public partial class EldenRingControl : UserControl
         vm.NewSplitPosition.X      = vm.CurrentPosition.X     ;
         vm.NewSplitPosition.Y      = vm.CurrentPosition.Y     ;
         vm.NewSplitPosition.Z      = vm.CurrentPosition.Z     ;
+    }
+
+    private GreatRuneTrackerWindow? _trackerWindow;
+
+    private void OpenGreatRuneTracker_Click(object sender, RoutedEventArgs e)
+    {
+        var vm = GetEldenRingViewModel();
+        if (_trackerWindow == null || !_trackerWindow.IsVisible)
+        {
+            _trackerWindow = new GreatRuneTrackerWindow
+            {
+                DataContext = vm.GreatRuneTracker
+            };
+        }
+        _trackerWindow.Show();
+        _trackerWindow.Activate();
     }
 }

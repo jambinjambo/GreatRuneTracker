@@ -1,4 +1,4 @@
-﻿// This file is part of the SoulSplitter distribution (https://github.com/FrankvdStam/SoulSplitter).
+// This file is part of the SoulSplitter distribution (https://github.com/FrankvdStam/SoulSplitter).
 // Copyright (c) 2022 Frank van der Stam.
 // https://github.com/FrankvdStam/SoulSplitter/blob/main/LICENSE
 //
@@ -16,6 +16,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using LiveSplit.Model;
 using SoulMemory;
@@ -38,6 +39,66 @@ internal class EldenRingSplitter : ISplitter
     // Great Rune tracking
     private Dictionary<GreatRune, bool> _previousGreatRuneStates = new();
     private bool _greatRuneTrackingInitialized;
+
+    // Boss tracking for JSON output
+    private Dictionary<uint, bool> _previousBossStates = new();
+
+    // Boss flag IDs (includes multi-phase bosses)
+    private static readonly uint[] BossFlags = {
+        // Limgrave & Weeping Peninsula
+        10000850, // Margit
+        10000800, // Godrick
+        1043300800, // Leonine Misbegotten
+        1035500800, // Tree Sentinel
+        // Liurnia
+        14000850, // Rennala Phase 1
+        14000801, // Rennala Phase 2
+        14000800, // Rennala (main)
+        12080800, // Royal Knight Loretta
+        // Caelid
+        12010800, // Starscourge Radahn
+        39200800, // Decaying Ekzykes
+        1039540800, // Commander O'Neil
+        // Altus Plateau & Mt Gelmir
+        11000850, // Godskin Apostle (Windmill)
+        11000800, // Godskin Apostle (Dominula)
+        35000800, // Tibia Mariner (Wyndham)
+        1052380800, // Elemer of the Briar
+        // Volcano Manor
+        12020800, // Abductor Virgins
+        12090800, // God-Devouring Serpent
+        12020850, // Rykard Phase 1
+        16000850, // Rykard Phase 2
+        16000801, // Rykard Phase 3
+        16000800, // Rykard (main)
+        // Leyndell
+        12040800, // Godfrey (Golden Shade)
+        1051570800, // Draconic Tree Sentinel
+        // Capital Outskirts
+        1052520801, // Fell Twins
+        1052520800, // Fell Twins (main)
+        // Mountaintops of the Giants
+        13000850, // Fire Giant Phase 1
+        13000830, // Fire Giant Phase 2
+        13000801, // Fire Giant Phase 3
+        13000800, // Fire Giant (main)
+        // Forbidden Lands & Consecrated Snowfield
+        15000850, // Loretta, Knight of the Haligtree
+        15000800, // Loretta (main)
+        // Crumbling Farum Azula
+        12050800, // Maliketh Phase 1
+        // Haligtree
+        11050801, // Malenia Phase 1
+        11050800, // Malenia (main)
+        // Elden Throne
+        19000810, // Elden Beast Phase 1
+        19000800, // Elden Beast (main)
+    };
+
+    // JSON output path
+    private static readonly string TrackerOutputPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SoulSplitter", "tracker_output.json");
 
     public EldenRingSplitter(LiveSplitState state, EldenRing eldenRing)
     {
@@ -82,7 +143,7 @@ internal class EldenRingSplitter : ISplitter
 
 
         ResultErr<RefreshError>? result = null;
-        
+
         //Refresh attachment to ER process
         mainViewModel.TryAndHandleError(() =>
         {
@@ -123,6 +184,11 @@ internal class EldenRingSplitter : ISplitter
         mainViewModel.TryAndHandleError(() =>
         {
             UpdateGreatRuneTracking();
+        });
+
+        mainViewModel.TryAndHandleError(() =>
+        {
+            UpdateTrackerOutput();
         });
 
         return result!;
@@ -178,6 +244,190 @@ internal class EldenRingSplitter : ISplitter
         _eldenRingViewModel.GreatRuneTracker.Reset();
     }
 
+    #region Tracker Output
+
+    // Separate tracking for JSON output (independent of UI tracker)
+    private Dictionary<GreatRune, bool> _trackerRuneStates = new();
+    private bool _trackerInitialized;
+    private int _previousOrdinalCount = 0;
+
+    // Ordinal flags: 181 = "Gets 1st Great Rune", 182 = "Gets 2nd Great Rune", etc.
+    // These flags are set when ANY great rune is obtained, regardless of which one
+    private static readonly uint[] OrdinalRuneFlags = { 181, 182, 183, 184, 185, 186, 187 };
+
+    // Specific rune flags (171-176) - these identify WHICH rune was obtained
+    // Note: Flag 197 (Unborn) may NOT be set in randomizer when obtained from non-Rennala location
+    private static readonly GreatRune[] SpecificRunes = { GreatRune.Godrick, GreatRune.Radahn, GreatRune.Morgott, GreatRune.Rykard, GreatRune.Mohg, GreatRune.Malenia };
+
+    private void UpdateTrackerOutput()
+    {
+        // Count how many ordinal flags are set (how many total runes the player has)
+        int GetOrdinalCount()
+        {
+            int count = 0;
+            foreach (var flag in OrdinalRuneFlags)
+            {
+                if (_eldenRing.ReadEventFlag(flag))
+                    count++;
+            }
+            return count;
+        }
+
+        // Check specific rune flags (171-176) - these work reliably
+        bool GetSpecificRuneState(GreatRune rune)
+        {
+            return _eldenRing.ReadEventFlag((uint)rune);
+        }
+
+        // For Unborn: Use deduction - if ordinal count > specific flags count, Unborn was obtained
+        // Note: Flag 197 is NOT set in randomizer when Unborn is obtained from non-Rennala location
+        bool GetUnbornState()
+        {
+            // First check flag 197 (works in vanilla, not in randomizer)
+            if (_eldenRing.ReadEventFlag((uint)GreatRune.Unborn))
+                return true;
+
+            // Deduction method: Count ordinal vs specific flags
+            int ordinalCount = GetOrdinalCount();
+            int specificCount = 0;
+            foreach (var rune in SpecificRunes)
+            {
+                if (_eldenRing.ReadEventFlag((uint)rune))
+                    specificCount++;
+            }
+
+            // If player has more runes (ordinal) than identified specific runes, Unborn was obtained
+            return ordinalCount > specificCount;
+        }
+
+        // Initialize all states on first run
+        if (!_trackerInitialized)
+        {
+            foreach (var flagId in BossFlags)
+            {
+                _previousBossStates[flagId] = _eldenRing.ReadEventFlag(flagId);
+            }
+            // Initialize specific rune states
+            foreach (var rune in SpecificRunes)
+            {
+                _trackerRuneStates[rune] = GetSpecificRuneState(rune);
+            }
+            // Initialize Unborn state using deduction
+            _trackerRuneStates[GreatRune.Unborn] = GetUnbornState();
+            _previousOrdinalCount = GetOrdinalCount();
+            _trackerInitialized = true;
+            WriteTrackerOutput();
+            return;
+        }
+
+        // Check for any changes
+        bool hasChanges = false;
+
+        // Check boss changes
+        foreach (var flagId in BossFlags)
+        {
+            bool currentState = _eldenRing.ReadEventFlag(flagId);
+            if (currentState != _previousBossStates[flagId])
+            {
+                _previousBossStates[flagId] = currentState;
+                hasChanges = true;
+            }
+        }
+
+        // Check Great Rune changes
+        // For specific runes (Godrick, Radahn, etc.) - use their specific flags (171-176)
+        // For Unborn - use deduction method since flag 197 may not be set in randomizer
+        foreach (var rune in SpecificRunes)
+        {
+            bool currentState = GetSpecificRuneState(rune);
+            bool prevState = _trackerRuneStates.TryGetValue(rune, out var prev) && prev;
+            if (currentState != prevState)
+            {
+                _trackerRuneStates[rune] = currentState;
+                hasChanges = true;
+            }
+        }
+        // Check Unborn separately using deduction
+        {
+            bool currentState = GetUnbornState();
+            bool prevState = _trackerRuneStates.TryGetValue(GreatRune.Unborn, out var prev) && prev;
+            if (currentState != prevState)
+            {
+                _trackerRuneStates[GreatRune.Unborn] = currentState;
+                hasChanges = true;
+            }
+        }
+
+        if (hasChanges)
+        {
+            WriteTrackerOutput();
+        }
+    }
+
+    private void WriteTrackerOutput()
+    {
+        try
+        {
+            // Ensure directory exists
+            var dir = Path.GetDirectoryName(TrackerOutputPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
+            // Build JSON manually to avoid dependencies
+            var lines = new List<string>();
+            lines.Add("{");
+            lines.Add($"  \"igt\": {_inGameTime},");
+            lines.Add($"  \"timestamp\": \"{DateTime.UtcNow:o}\",");
+            lines.Add($"  \"timerRunning\": {(_timerState == TimerState.Running).ToString().ToLower()},");
+
+            // Great Runes - use tracked states (which use deduction for Unborn)
+            lines.Add("  \"greatRunes\": {");
+            var runeEntries = new List<string>();
+            foreach (GreatRune rune in Enum.GetValues(typeof(GreatRune)))
+            {
+                // Use the tracked state which already handles Unborn via deduction
+                bool state = _trackerRuneStates.TryGetValue(rune, out var s) && s;
+                runeEntries.Add($"    \"{rune}\": {state.ToString().ToLower()}");
+            }
+            lines.Add(string.Join(",\n", runeEntries));
+            lines.Add("  },");
+
+            // Bosses - read directly from game memory
+            lines.Add("  \"bosses\": {");
+            var bossEntries = new List<string>();
+            foreach (var flagId in BossFlags)
+            {
+                bool state = _eldenRing.ReadEventFlag(flagId);
+                bossEntries.Add($"    \"{flagId}\": {state.ToString().ToLower()}");
+            }
+            lines.Add(string.Join(",\n", bossEntries));
+            lines.Add("  }");
+
+            lines.Add("}");
+
+            File.WriteAllText(TrackerOutputPath, string.Join("\n", lines));
+        }
+        catch
+        {
+            // Silently fail - don't crash SoulSplitter for tracker output
+        }
+    }
+
+    private void ResetTrackerOutput()
+    {
+        _previousBossStates.Clear();
+        _trackerRuneStates.Clear();
+        _previousOrdinalCount = 0;
+        _trackerInitialized = false;
+
+        // Write initial state
+        WriteTrackerOutput();
+    }
+
+    #endregion
+
     //Starting the timer by calling Start(); on a TimerModel object will trigger more than just SoulSplitter's start event.
     //It occurred at least twice that another plugin would throw exceptions during the start event, causing SoulSplitter's start event to never be called at all.
     //That in turn never changed the timer state to running. We can not rely on this event.
@@ -196,6 +446,7 @@ internal class EldenRingSplitter : ISplitter
         ResetAutoSplitting();
         _mainViewModel.FlagTrackerViewModel.Reset();
         ResetGreatRuneTracking();
+        ResetTrackerOutput();
     }
 
     #region Timer
@@ -380,6 +631,6 @@ internal class EldenRingSplitter : ISplitter
         }
     }
 
-   
+
     #endregion
 }

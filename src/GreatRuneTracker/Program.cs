@@ -1,13 +1,14 @@
 // Great Rune Tracker - Standalone console app for Elden Ring randomizer runs
-// Monitors Great Rune event flags and logs them with locations from spoiler logs
+// Reads flag states from SoulSplitter's JSON output to avoid memory conflicts
+// Monitors Great Rune and Boss event flags and logs them with locations from spoiler logs
 
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
-using SoulMemory.EldenRing;
 
 namespace GreatRuneTracker;
 
@@ -25,24 +26,97 @@ class Program
         { 197, "Great Rune of the Unborn" }
     };
 
+    // Map GreatRune enum names to flag IDs (for JSON parsing)
+    private static readonly Dictionary<string, uint> GreatRuneNameToFlag = new()
+    {
+        { "Godrick", 171 },
+        { "Radahn", 172 },
+        { "Morgott", 173 },
+        { "Rykard", 174 },
+        { "Mohg", 175 },
+        { "Malenia", 176 },
+        { "Unborn", 197 }
+    };
+
+    // Boss event flag IDs - the 30 major bosses tracked for races
+    // For multi-phase fights, we track the Phase 2 flag as the completion trigger
+    private static readonly Dictionary<uint, string> BossFlags = new()
+    {
+        { 10000850, "Margit, the Fell Omen" },
+        { 10000800, "Godrick the Grafted" },
+        { 1043300800, "Leonine Misbegotten" },
+        { 1035500800, "Royal Knight Loretta" },
+        { 14000850, "Red Wolf of Radagon" },
+        { 14000800, "Rennala" },                 // Multi-phase
+        { 12080800, "Ancestor Spirit" },
+        { 12010800, "Dragonkin Soldier of Nokstella" },
+        { 39200800, "Magma Wyrm Makar" },
+        { 1039540800, "Elemer of the Briar" },
+        { 11000850, "Godfrey, First Elden Lord (Golden Shade)" },
+        { 11000800, "Morgott, the Omen King" },
+        { 35000800, "Mohg, the Omen" },
+        { 1052380800, "Starscourge Radahn" },
+        { 12020850, "Mimic Tear" },
+        { 12090800, "Regal Ancestor Spirit" },
+        { 12020800, "Valiant Gargoyles" },
+        { 16000850, "Godskin Noble" },
+        { 16000800, "Rykard" },                  // Multi-phase
+        { 12040800, "Astel, Naturalborn of the Void" },
+        { 1051570800, "Commander Niall" },
+        { 1052520800, "Fire Giant" },            // Multi-phase
+        { 13000850, "Godskin Duo" },
+        { 13000830, "Dragonlord Placidusax" },
+        { 13000800, "Maliketh" },               // Multi-phase
+        { 15000850, "Loretta, Knight of the Haligtree" },
+        { 15000800, "Malenia, Blade of Miquella" },
+        { 12050800, "Mohg, Lord of Blood" },
+        { 11050800, "Hoarah Loux" },             // Multi-phase
+        { 19000800, "Elden Beast" }              // Multi-phase
+    };
+
+    // Multi-phase boss mappings: Phase 2 flag -> Phase 1 flag
+    private static readonly Dictionary<uint, uint> MultiPhaseBosses = new()
+    {
+        { 14000800, 14000801 },    // Rennala: Phase 2 -> Phase 1
+        { 16000800, 16000801 },    // Rykard: Phase 2 -> Phase 1
+        { 1052520800, 1052520801 },// Fire Giant: Phase 2 -> Phase 1
+        { 13000800, 13000801 },    // Maliketh: Phase 2 -> Phase 1
+        { 11050800, 11050801 },    // Hoarah Loux: Phase 2 -> Phase 1
+        { 19000800, 19000810 }     // Elden Beast: Phase 2 -> Phase 1
+    };
+
     // Track which runes have been obtained
     private static readonly Dictionary<uint, bool> ObtainedRunes = new();
+
+    // Track which bosses have been defeated
+    private static readonly Dictionary<uint, bool> DefeatedBosses = new();
 
     // Spoiler log data: rune name -> (area, detailed location)
     private static readonly Dictionary<string, (string Area, string Detail)> RuneLocations = new();
 
+    // Spoiler log data: boss flag ID -> replacement boss name
+    private static readonly Dictionary<uint, string> BossReplacements = new();
+
     // Output file path
-    private static string _outputFile = "GreatRuneLog.txt";
+    private static string _outputFile = "logs/TrackerLog.txt";
 
     // Seed from spoiler log
     private static string? _seed;
 
-    // List of obtained runes for output
-    private static readonly List<(string Name, string Location, string Time)> ObtainedList = new();
+    // SoulSplitter JSON input path
+    private static readonly string SoulSplitterJsonPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SoulSplitter", "tracker_output.json");
+
+    // Unified event list - stores all events in chronological order
+    // EventType: "rune" or "boss"
+    // For runes: Primary = rune name, Secondary = location
+    // For bosses: Primary = original boss, Secondary = replacement boss
+    private static readonly List<(string EventType, string Primary, string Secondary, string Time, int IgtMs)> EventList = new();
 
     static void Main(string[] args)
     {
-        Console.Title = "Great Rune Tracker";
+        Console.Title = "Elden Ring Randomizer Tracker";
         PrintHeader();
 
         // Parse command line arguments
@@ -72,101 +146,199 @@ class Program
             ObtainedRunes[flag] = false;
         }
 
+        // Initialize boss tracking state
+        foreach (var flag in BossFlags.Keys)
+        {
+            DefeatedBosses[flag] = false;
+        }
+
         // Try to load spoiler log
         LoadSpoilerLog(spoilerPath);
 
-        // Connect to game and start tracking
-        var eldenRing = new EldenRing();
-
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine("[STATUS] Waiting for Elden Ring...");
-        Console.WriteLine("         (Make sure EAC is disabled)");
+        Console.WriteLine("[STATUS] Waiting for SoulSplitter data...");
+        Console.WriteLine($"         Reading from: {SoulSplitterJsonPath}");
+        Console.WriteLine("         (Make sure LiveSplit with SoulSplitter is running)");
         Console.ResetColor();
 
         bool wasConnected = false;
         bool initialStateRead = false;
+        DateTime lastModified = DateTime.MinValue;
 
         while (true)
         {
             try
             {
-                var result = eldenRing.TryRefresh();
-
-                if (result.IsOk)
+                if (File.Exists(SoulSplitterJsonPath))
                 {
-                    if (!wasConnected)
+                    var fileInfo = new FileInfo(SoulSplitterJsonPath);
+
+                    // Only process if file was modified
+                    if (fileInfo.LastWriteTime > lastModified)
                     {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine("\n[STATUS] Connected to Elden Ring!");
-                        Console.ResetColor();
-                        wasConnected = true;
-                        initialStateRead = false;
+                        lastModified = fileInfo.LastWriteTime;
 
-                        // Write initial output file
-                        WriteOutputFile();
-                    }
+                        // Read and parse JSON
+                        string json = File.ReadAllText(SoulSplitterJsonPath);
+                        var data = ParseTrackerJson(json);
 
-                    // Read initial state of all flags (to avoid false positives on connect)
-                    if (!initialStateRead)
-                    {
-                        foreach (var flag in GreatRuneFlags.Keys)
+                        if (data != null)
                         {
-                            ObtainedRunes[flag] = eldenRing.ReadEventFlag(flag);
-                        }
-                        initialStateRead = true;
+                            if (!wasConnected)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Green;
+                                Console.WriteLine("\n[STATUS] Connected to SoulSplitter!");
+                                Console.ResetColor();
+                                wasConnected = true;
+                                initialStateRead = false;
 
-                        // Check if any runes were already obtained
-                        int alreadyObtained = ObtainedRunes.Count(r => r.Value);
-                        if (alreadyObtained > 0)
-                        {
-                            Console.ForegroundColor = ConsoleColor.Cyan;
-                            Console.WriteLine($"[INFO] {alreadyObtained} Great Rune(s) already obtained in this save");
-                            Console.ResetColor();
-                        }
+                                // Write initial output file
+                                WriteOutputFile();
+                            }
 
-                        Console.WriteLine("\n[TRACKING] Monitoring for Great Runes...\n");
-                    }
+                            // Read initial state of all flags (to avoid false positives on connect)
+                            if (!initialStateRead)
+                            {
+                                foreach (var rune in data.GreatRunes)
+                                {
+                                    if (GreatRuneNameToFlag.TryGetValue(rune.Key, out uint flagId))
+                                    {
+                                        ObtainedRunes[flagId] = rune.Value;
+                                    }
+                                }
+                                foreach (var boss in data.Bosses)
+                                {
+                                    if (uint.TryParse(boss.Key, out uint flagId))
+                                    {
+                                        DefeatedBosses[flagId] = boss.Value;
+                                    }
+                                }
+                                initialStateRead = true;
 
-                    // Check for newly obtained runes
-                    foreach (var kvp in GreatRuneFlags)
-                    {
-                        uint flagId = kvp.Key;
-                        string runeName = kvp.Value;
+                                // Check if any runes were already obtained
+                                int alreadyObtainedRunes = ObtainedRunes.Count(r => r.Value);
+                                int alreadyDefeatedBosses = DefeatedBosses.Count(b => b.Value);
+                                if (alreadyObtainedRunes > 0 || alreadyDefeatedBosses > 0)
+                                {
+                                    Console.ForegroundColor = ConsoleColor.Cyan;
+                                    if (alreadyObtainedRunes > 0)
+                                        Console.WriteLine($"[INFO] {alreadyObtainedRunes} Great Rune(s) already obtained in this save");
+                                    if (alreadyDefeatedBosses > 0)
+                                        Console.WriteLine($"[INFO] {alreadyDefeatedBosses} Boss(es) already defeated in this save");
+                                    Console.ResetColor();
+                                }
 
-                        bool currentState = eldenRing.ReadEventFlag(flagId);
+                                Console.WriteLine("\n[TRACKING] Monitoring for Great Runes and Bosses...\n");
+                            }
+                            else
+                            {
+                                // Check for newly defeated bosses FIRST (before runes)
+                                foreach (var boss in data.Bosses)
+                                {
+                                    if (!uint.TryParse(boss.Key, out uint flagId))
+                                        continue;
 
-                        if (currentState && !ObtainedRunes[flagId])
-                        {
-                            // Rune was just obtained!
-                            ObtainedRunes[flagId] = true;
+                                    if (!BossFlags.TryGetValue(flagId, out string? bossName))
+                                        continue;
 
-                            // Get IGT
-                            int igtMs = eldenRing.GetInGameTimeMilliseconds();
-                            string igtFormatted = FormatTime(igtMs);
+                                    bool currentState = boss.Value;
 
-                            // Get location from spoiler log
-                            string location = GetDisplayLocation(runeName);
+                                    bool previousState = DefeatedBosses.TryGetValue(flagId, out var prev) && prev;
+                                    if (currentState && !previousState)
+                                    {
+                                        // Boss was just defeated!
+                                        DefeatedBosses[flagId] = true;
 
-                            // Add to list
-                            ObtainedList.Add((runeName, location, igtFormatted));
+                                        // Get IGT from JSON
+                                        int igtMs = data.Igt;
+                                        string igtFormatted = FormatTime(igtMs);
 
-                            // Print to console
-                            Console.ForegroundColor = ConsoleColor.Green;
-                            Console.WriteLine($"[{igtFormatted}] OBTAINED: {runeName}");
-                            Console.ForegroundColor = ConsoleColor.White;
-                            Console.WriteLine($"           Location: {location}");
-                            Console.ResetColor();
-                            Console.WriteLine();
+                                        // Get replacement boss(es) from spoiler log
+                                        string replacementDisplay;
+                                        if (MultiPhaseBosses.TryGetValue(flagId, out uint phase1Flag))
+                                        {
+                                            // Multi-phase boss: get both phase replacements
+                                            string phase1Boss = BossReplacements.TryGetValue(phase1Flag, out var p1)
+                                                ? p1 : "Unknown";
+                                            string phase2Boss = BossReplacements.TryGetValue(flagId, out var p2)
+                                                ? p2 : "Unknown";
+                                            replacementDisplay = $"{phase1Boss} (Phase 1) {phase2Boss} (Phase 2)";
+                                        }
+                                        else
+                                        {
+                                            // Single-phase boss
+                                            replacementDisplay = BossReplacements.TryGetValue(flagId, out var replacement)
+                                                ? replacement : "Unknown";
+                                        }
 
-                            // Update output file
-                            WriteOutputFile();
+                                        // Add to unified event list
+                                        EventList.Add(("boss", bossName, replacementDisplay, igtFormatted, igtMs));
 
-                            // Show progress
-                            int obtained = ObtainedRunes.Count(r => r.Value);
-                            Console.ForegroundColor = ConsoleColor.Cyan;
-                            Console.WriteLine($"           Progress: {obtained}/7 Great Runes\n");
-                            Console.ResetColor();
+                                        // Print to console
+                                        Console.ForegroundColor = ConsoleColor.Yellow;
+                                        Console.WriteLine($"[{igtFormatted}] DEFEATED: {bossName}");
+                                        Console.ForegroundColor = ConsoleColor.White;
+                                        Console.WriteLine($"           Was: {replacementDisplay}");
+                                        Console.ResetColor();
+
+                                        // Update output file
+                                        WriteOutputFile();
+
+                                        // Show progress
+                                        int obtainedRunes = ObtainedRunes.Count(r => r.Value);
+                                        int defeatedBosses = DefeatedBosses.Count(b => b.Value);
+                                        Console.ForegroundColor = ConsoleColor.Cyan;
+                                        Console.WriteLine($"           Progress: {obtainedRunes}/7 Runes | {defeatedBosses}/30 Bosses\n");
+                                        Console.ResetColor();
+                                    }
+                                }
+
+                                // Check for newly obtained runes AFTER bosses
+                                foreach (var rune in data.GreatRunes)
+                                {
+                                    if (!GreatRuneNameToFlag.TryGetValue(rune.Key, out uint flagId))
+                                        continue;
+
+                                    if (!GreatRuneFlags.TryGetValue(flagId, out string? runeName))
+                                        continue;
+
+                                    bool currentState = rune.Value;
+
+                                    if (currentState && !ObtainedRunes[flagId])
+                                    {
+                                        // Rune was just obtained!
+                                        ObtainedRunes[flagId] = true;
+
+                                        // Get IGT from JSON
+                                        int igtMs = data.Igt;
+                                        string igtFormatted = FormatTime(igtMs);
+
+                                        // Get location from spoiler log
+                                        string location = GetDisplayLocation(runeName);
+
+                                        // Add to unified event list
+                                        EventList.Add(("rune", runeName, location, igtFormatted, igtMs));
+
+                                        // Print to console
+                                        Console.ForegroundColor = ConsoleColor.Green;
+                                        Console.WriteLine($"[{igtFormatted}] OBTAINED: {runeName}");
+                                        Console.ForegroundColor = ConsoleColor.White;
+                                        Console.WriteLine($"           Location: {location}");
+                                        Console.ResetColor();
+
+                                        // Update output file
+                                        WriteOutputFile();
+
+                                        // Show progress
+                                        int obtainedRunes = ObtainedRunes.Count(r => r.Value);
+                                        int defeatedBosses = DefeatedBosses.Count(b => b.Value);
+                                        Console.ForegroundColor = ConsoleColor.Cyan;
+                                        Console.WriteLine($"           Progress: {obtainedRunes}/7 Runes | {defeatedBosses}/30 Bosses\n");
+                                        Console.ResetColor();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -175,8 +347,8 @@ class Program
                     if (wasConnected)
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine("\n[STATUS] Disconnected from Elden Ring");
-                        Console.WriteLine("[STATUS] Waiting for reconnection...");
+                        Console.WriteLine("\n[STATUS] SoulSplitter data file not found");
+                        Console.WriteLine("[STATUS] Waiting for SoulSplitter...");
                         Console.ResetColor();
                         wasConnected = false;
                         initialStateRead = false;
@@ -199,6 +371,53 @@ class Program
         }
     }
 
+    class TrackerData
+    {
+        public int Igt { get; set; }
+        public string? Timestamp { get; set; }
+        public bool TimerRunning { get; set; }
+        public Dictionary<string, bool> GreatRunes { get; set; } = new();
+        public Dictionary<string, bool> Bosses { get; set; } = new();
+    }
+
+    static TrackerData? ParseTrackerJson(string json)
+    {
+        try
+        {
+            var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var data = new TrackerData
+            {
+                Igt = root.TryGetProperty("igt", out var igt) ? igt.GetInt32() : 0,
+                Timestamp = root.TryGetProperty("timestamp", out var ts) ? ts.GetString() : null,
+                TimerRunning = root.TryGetProperty("timerRunning", out var tr) && tr.GetBoolean()
+            };
+
+            if (root.TryGetProperty("greatRunes", out var runes))
+            {
+                foreach (var prop in runes.EnumerateObject())
+                {
+                    data.GreatRunes[prop.Name] = prop.Value.GetBoolean();
+                }
+            }
+
+            if (root.TryGetProperty("bosses", out var bosses))
+            {
+                foreach (var prop in bosses.EnumerateObject())
+                {
+                    data.Bosses[prop.Name] = prop.Value.GetBoolean();
+                }
+            }
+
+            return data;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     static string GetDisplayLocation(string runeName)
     {
         if (RuneLocations.TryGetValue(runeName, out var loc))
@@ -214,8 +433,9 @@ class Program
         Console.ForegroundColor = ConsoleColor.Magenta;
         Console.WriteLine(@"
   ╔═══════════════════════════════════════╗
-  ║       GREAT RUNE TRACKER v1.0         ║
-  ║   For Elden Ring Randomizer Runs      ║
+  ║   ELDEN RING RANDOMIZER TRACKER v2.0  ║
+  ║     Great Runes + Boss Tracking       ║
+  ║        (SoulSplitter Mode)            ║
   ╚═══════════════════════════════════════╝
 ");
         Console.ResetColor();
@@ -226,20 +446,28 @@ class Program
         Console.WriteLine(@"
 Usage: GreatRuneTracker.exe [options]
 
+Tracks Great Rune acquisitions and boss kills in Elden Ring randomizer runs.
+Reads flag data from SoulSplitter's JSON output (no direct game memory access).
+Events are logged chronologically with IGT timestamps.
+
+IMPORTANT: This tracker requires LiveSplit with SoulSplitter to be running.
+           SoulSplitter writes flag states to a JSON file that this tracker reads.
+
 Options:
   -s, --spoiler <path>   Path to spoiler log file or directory
-  -o, --output <path>    Output file path (default: GreatRuneLog.txt)
+  -o, --output <path>    Output file path (default: logs/TrackerLog.txt)
   -h, --help             Show this help message
 
 Examples:
   GreatRuneTracker.exe
   GreatRuneTracker.exe -s ""C:\path\to\spoiler_logs""
-  GreatRuneTracker.exe -s ""C:\path\to\spoiler.txt"" -o ""MyRun.txt""
+  GreatRuneTracker.exe -s ""C:\path\to\spoiler.txt"" -o ""logs\MyRun.txt""
 
 The tracker will automatically search for spoiler_logs in:
-  - Current directory
-  - ../spoiler_logs (parent folder)
-  - ../../spoiler_logs (grandparent folder)
+  - ./randomizer/spoiler_logs
+  - ./spoiler_logs
+  - ../spoiler_logs
+  - ../../spoiler_logs
 ");
     }
 
@@ -371,10 +599,35 @@ The tracker will automatically search for spoiler_logs in:
             var detailedPattern = new Regex(@"^(Godrick's Great Rune|Radahn's Great Rune|Morgott's Great Rune|Rykard's Great Rune|Mohg's Great Rune|Malenia's Great Rune|Great Rune of the Unborn)\s+in\s+([^:]+):\s*(.+)$",
                 RegexOptions.IgnoreCase);
 
+            // Regex for boss replacements: "Replacing Margit, the Fell Omen (#10000850) in Stormveil Castle: Erdtree Burial Watchdog and Imps (#30010800) from Impaler's Catacombs"
+            var bossReplacementPattern = new Regex(@"Replacing\s+(.+?)\s+\(#(\d+)\)\s+in\s+[^:]+:\s+(.+?)\s+\(#\d+\)\s+from",
+                RegexOptions.IgnoreCase);
+
+            int bossReplacementsFound = 0;
+
             foreach (var line in lines)
             {
                 // Check for seed in content
                 var seedContentMatch = seedPattern.Match(line);
+
+                // Check for boss replacements
+                var bossMatch = bossReplacementPattern.Match(line);
+                if (bossMatch.Success)
+                {
+                    string originalBossName = bossMatch.Groups[1].Value.Trim();
+                    if (uint.TryParse(bossMatch.Groups[2].Value, out uint flagId))
+                    {
+                        string replacementBoss = bossMatch.Groups[3].Value.Trim();
+                        // Strip " Boss" suffix from replacement names
+                        if (replacementBoss.EndsWith(" Boss"))
+                        {
+                            replacementBoss = replacementBoss.Substring(0, replacementBoss.Length - 5);
+                        }
+                        BossReplacements[flagId] = replacementBoss;
+                        bossReplacementsFound++;
+                    }
+                    continue;
+                }
                 if (seedContentMatch.Success && _seed == null)
                 {
                     _seed = seedContentMatch.Groups[1].Value;
@@ -423,12 +676,24 @@ The tracker will automatically search for spoiler_logs in:
 
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"[INFO] Spoiler log loaded (locations hidden for racing!)");
+            if (bossReplacementsFound > 0)
+            {
+                Console.WriteLine($"[INFO] Found {bossReplacementsFound} boss replacements");
+            }
             Console.ResetColor();
 
-            // Generate output filename based on date and seed
+            // Generate output filename based on date and seed, in logs subdirectory
             string dateStr = DateTime.Now.ToString("yyyy-MM-dd");
             string seedStr = _seed ?? "unknown";
-            _outputFile = $"{dateStr}_{seedStr}_GreatRuneLog.txt";
+            string logsDir = "logs";
+
+            // Create logs directory if it doesn't exist
+            if (!Directory.Exists(logsDir))
+            {
+                Directory.CreateDirectory(logsDir);
+            }
+
+            _outputFile = Path.Combine(logsDir, $"{dateStr}_{seedStr}_TrackerLog.txt");
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine($"[INFO] Output file: {_outputFile}");
             Console.ResetColor();
@@ -448,6 +713,12 @@ The tracker will automatically search for spoiler_logs in:
         // These are well-known checks in the racing community
         // Loaded from CheckPatterns.tsv
         // ============================================
+
+        // Margit, the Fell Omen (not combined with Morgott)
+        if (details.IndexOf("Margit", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return "Margit, the Fell Omen";
+        }
 
         // Castle Sol - Commander Niall drops Haligtree Medallion piece
         if (details.IndexOf("Commander Niall", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -603,9 +874,16 @@ The tracker will automatically search for spoiler_logs in:
     {
         try
         {
+            // Ensure logs directory exists
+            string? dir = Path.GetDirectoryName(_outputFile);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+
             using var writer = new StreamWriter(_outputFile, false);
 
-            writer.WriteLine("=== GREAT RUNE TRACKER ===");
+            writer.WriteLine("=== ELDEN RING RANDOMIZER TRACKER ===");
             writer.WriteLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             if (_seed != null)
             {
@@ -613,28 +891,35 @@ The tracker will automatically search for spoiler_logs in:
             }
             writer.WriteLine();
 
-            if (ObtainedList.Count == 0)
+            if (EventList.Count == 0)
             {
-                writer.WriteLine("No Great Runes obtained yet.");
-                writer.WriteLine();
-                writer.WriteLine("Progress: 0/7 Great Runes");
+                writer.WriteLine("No events recorded yet.");
             }
             else
             {
-                writer.WriteLine("--- Great Runes Obtained ---");
+                writer.WriteLine("--- Event Log ---");
                 writer.WriteLine();
 
-                for (int i = 0; i < ObtainedList.Count; i++)
+                foreach (var evt in EventList)
                 {
-                    var (name, location, time) = ObtainedList[i];
-                    writer.WriteLine($"{i + 1}. {name}");
-                    writer.WriteLine($"   Location: {location}");
-                    writer.WriteLine($"   IGT: {time}");
+                    if (evt.EventType == "rune")
+                    {
+                        writer.WriteLine($"[{evt.Time}] OBTAINED: {evt.Primary}");
+                        writer.WriteLine($"           Location: {evt.Secondary}");
+                    }
+                    else if (evt.EventType == "boss")
+                    {
+                        writer.WriteLine($"[{evt.Time}] DEFEATED: {evt.Primary}");
+                        writer.WriteLine($"           Was: {evt.Secondary}");
+                    }
                     writer.WriteLine();
                 }
-
-                writer.WriteLine($"--- Progress: {ObtainedList.Count}/7 Great Runes ---");
             }
+
+            // Progress summary
+            int obtainedRunes = ObtainedRunes.Count(r => r.Value);
+            int defeatedBosses = DefeatedBosses.Count(b => b.Value);
+            writer.WriteLine($"--- Progress: {obtainedRunes}/7 Runes | {defeatedBosses}/30 Bosses ---");
         }
         catch (Exception ex)
         {

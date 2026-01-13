@@ -7,11 +7,11 @@
         <LangVersion>12</LangVersion>
         <Nullable>enable</Nullable>
         <Title>GreatRuneTracker</Title>
-        <Description>Standalone Great Rune tracker for Elden Ring randomizer runs</Description>
+        <Description>Standalone Great Rune tracker for Elden Ring randomizer runs (SoulSplitter mode)</Description>
         <Copyright>(c) 2024, GPL-v3 licensed</Copyright>
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\SoulMemory\SoulMemory.csproj" />
+        <PackageReference Include="System.Text.Json" Version="9.0.0" />
     </ItemGroup>
 </Project>
